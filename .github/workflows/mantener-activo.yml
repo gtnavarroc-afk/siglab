@@ -1,0 +1,15 @@
+name: Mantener activo Supabase
+
+on:
+  schedule:
+    - cron: '0 13 * * 1,4'   # lunes y jueves, 8:00 a. m. hora de Colombia
+  workflow_dispatch:          # permite ejecutarlo a mano para probar
+
+jobs:
+  consultar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Consultar la base de datos
+        run: |
+          curl -fsS "https://zqanpqqzynwkekldigje.supabase.co/rest/v1/instituciones?select=id&limit=1" \
+            -H "apikey: sb_publishable_Qu4KNpEMHWVLnk_vMG0Iyw_a2G_LZRC"
