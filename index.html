@@ -2476,7 +2476,7 @@ function descargarOrganigrama(){
   const node = document.getElementById('orgChartCapture');
   if(!node || typeof html2canvas === 'undefined'){ showToast('No se pudo generar la imagen. Intenta de nuevo.'); return; }
   showToast('Generando imagen del organigrama...');
-  html2canvas(node, {backgroundColor:'#ffffff', scale:2}).then(canvas=>{
+  html2canvas(node, {backgroundColor:'#ffffff', scale:2, useCORS:true}).then(canvas=>{
     const link = document.createElement('a');
     link.download = `organigrama-${slug(state.empresa.nombre)}.png`;
     link.href = canvas.toDataURL('image/png');
@@ -3091,7 +3091,7 @@ function descargarMapa(){
   const node = document.getElementById('procMapCapture');
   if(!node || typeof html2canvas === 'undefined'){ showToast('No se pudo generar la imagen. Intenta de nuevo.'); return; }
   showToast('Generando imagen del mapa...');
-  html2canvas(node, {backgroundColor:'#ffffff', scale:2}).then(canvas=>{
+  html2canvas(node, {backgroundColor:'#ffffff', scale:2, useCORS:true}).then(canvas=>{
     const link = document.createElement('a');
     link.download = `mapa-procesos-${state.empresa.nombre.replace(/\s+/g,'_')}.png`;
     link.href = canvas.toDataURL('image/png');
@@ -3755,7 +3755,28 @@ function plantillaProcedimientoSecciones(p){
 
 const PDF_MARGEN = 36; // puntos (~1.27 cm) de margen en las cuatro caras
 
-function esperarImagenes(container){
+/* El logo vive en Supabase (otro dominio); html2canvas omite las imágenes externas.
+   Se descargan y se incrustan como datos dentro de la página antes de generar el PDF. */
+const cacheImagenesIncrustadas = {};
+async function urlADataURL(url){
+  if(cacheImagenesIncrustadas[url]) return cacheImagenesIncrustadas[url];
+  const resp = await fetch(url, { mode:'cors', cache:'no-cache' });
+  if(!resp.ok) throw new Error('HTTP ' + resp.status);
+  const blob = await resp.blob();
+  const dataUrl = await new Promise((res, rej)=>{ const fr = new FileReader(); fr.onload = ()=>res(fr.result); fr.onerror = rej; fr.readAsDataURL(blob); });
+  cacheImagenesIncrustadas[url] = dataUrl;
+  return dataUrl;
+}
+async function incrustarImagenes(container){
+  const imgs = Array.from(container.querySelectorAll('img')).filter(img=>/^https?:/i.test(img.getAttribute('src')||''));
+  await Promise.all(imgs.map(async img=>{
+    try { img.src = await urlADataURL(img.getAttribute('src')); }
+    catch(err){ console.warn('No se pudo incrustar la imagen', err); }
+  }));
+}
+
+async function esperarImagenes(container){
+  await incrustarImagenes(container);
   const imgs = Array.from(container.querySelectorAll('img'));
   return Promise.all(imgs.map(img=>{
     if(img.complete) return Promise.resolve();
@@ -3784,7 +3805,7 @@ async function generarPDFDesdeSecciones(secciones, filename){
     for (let i = 0; i < secciones.length; i++) {
       tpl.innerHTML = `<div style="font-family:Georgia, serif; color:#111; width:730px;">${secciones[i]}</div>`;
       await esperarImagenes(tpl);
-      const canvas = await html2canvas(tpl, { backgroundColor: '#ffffff', scale: 2 });
+      const canvas = await html2canvas(tpl, { backgroundColor: '#ffffff', scale: 2, useCORS: true });
       const imgWidth = usableWidth;
       const imgHeight = canvas.height * imgWidth / canvas.width;
 
@@ -3994,7 +4015,7 @@ function descargarTrazabilidadImagen(){
   const node = document.getElementById('trazaCapture');
   if(!node || typeof html2canvas === 'undefined'){ showToast('No se pudo generar la imagen.'); return; }
   showToast('Generando imagen...');
-  html2canvas(node, {backgroundColor:'#ffffff', scale:2}).then(canvas=>{
+  html2canvas(node, {backgroundColor:'#ffffff', scale:2, useCORS:true}).then(canvas=>{
     const link = document.createElement('a');
     link.download = `trazabilidad-${slug(state.empresa.nombre)}.png`;
     link.href = canvas.toDataURL('image/png');
