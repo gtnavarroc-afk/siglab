@@ -519,9 +519,16 @@ async function sbCrearEstudianteDocente({ nombre, correo, password, equipoId }){
 async function sbObtenerMiEquipo(){
   const { data:{ user } } = await sb.auth.getUser();
   if(!user) return null;
-  const { data, error } = await sb.from('integrantes_equipo')
-    .select('equipo_id, equipos(*, cursos(nombre), empresas_simuladas(*))')
+  // Se piden también los integrantes con cuenta (el líder) para mostrar sus nombres en el manual.
+  // Si esa consulta ampliada fallara por permisos, se usa la consulta original para no bloquear al equipo.
+  let { data, error } = await sb.from('integrantes_equipo')
+    .select('equipo_id, equipos(*, cursos(nombre), empresas_simuladas(*), integrantes_equipo(usuario_id, perfiles(id, nombre, activo)))')
     .eq('usuario_id', user.id).maybeSingle();
+  if(error){
+    ({ data, error } = await sb.from('integrantes_equipo')
+      .select('equipo_id, equipos(*, cursos(nombre), empresas_simuladas(*))')
+      .eq('usuario_id', user.id).maybeSingle());
+  }
   if(error || !data) return null;
   try{
     const { data: sc } = await sb.from('integrantes_sin_cuenta').select('id, nombre').eq('equipo_id', data.equipo_id);
@@ -3898,9 +3905,56 @@ function encabezadoDocumentoHTML(titulo, subtitulo, version){
     </tr>
   </table>`;
 }
+/** Nombre del líder del equipo; si la consulta no lo trajo y quien genera es el líder, usa su propio nombre. */
+function nombreLiderEquipo(miEquipo){
+  if(miEquipo && miEquipo.liderNombre) return miEquipo.liderNombre;
+  if(state.role==='estudiante' && state.currentUser && state.currentUser.nombre) return state.currentUser.nombre;
+  return '';
+}
+/** Lista sin repetir de los integrantes del equipo: primero el líder, luego los demás. */
+function integrantesEquipoManual(){
+  const miEquipo = state.equipos.find(e=>e.id===state.miEquipoId);
+  const lider = nombreLiderEquipo(miEquipo);
+  const lista = [];
+  const vistos = new Set();
+  const agregar = (nombre, rol)=>{
+    const n = (nombre||'').trim(); const k = n.toLowerCase();
+    if(!n || vistos.has(k)) return; vistos.add(k); lista.push({ nombre:n, rol });
+  };
+  agregar(lider, 'Líder del equipo');
+  (miEquipo ? miEquipo.integrantes : []).forEach(n=>agregar(n, 'Integrante'));
+  return { miEquipo, lista };
+}
+function seccionIntegrantesManualHTML(){
+  const { miEquipo, lista } = integrantesEquipoManual();
+  const hoy = new Date().toLocaleDateString('es-CO');
+  const td = 'border:1px solid #999;padding:9px 8px;font-size:10.5px;';
+  const th = 'border:1px solid #333;padding:6px 8px;background:#E7ECF2;font-size:10px;text-align:left;';
+  const filas = lista.map((p,i)=>`<tr>
+      <td style="${td}width:6%;text-align:center;">${i+1}</td>
+      <td style="${td}">${p.nombre}</td>
+      <td style="${td}width:22%;">${p.rol}</td>
+      <td style="${td}width:30%;">&nbsp;</td>
+    </tr>`).join('')
+    || `<tr><td colspan="4" style="${td}">No hay integrantes registrados en el equipo.</td></tr>`;
+  return `
+    <table style="width:100%;border-collapse:collapse;margin-bottom:8px;font-size:10.5px;">
+      ${filaPDF('Empresa simulada', state.empresa.nombre)}
+      ${filaPDF('Equipo', miEquipo ? miEquipo.nombre : '')}
+      ${filaPDF('Curso', miEquipo ? miEquipo.curso : '')}
+      ${filaPDF('Fecha de generación', hoy)}
+    </table>
+    <table style="width:100%;border-collapse:collapse;">
+      <thead><tr>
+        <th style="${th}text-align:center;">#</th><th style="${th}">Nombre completo</th><th style="${th}">Rol</th><th style="${th}">Firma</th>
+      </tr></thead>
+      <tbody>${filas}</tbody>
+    </table>`;
+}
+
 function construirControlDocumentalGenerico(){
   const miEquipo = state.equipos.find(e=>e.id===state.miEquipoId);
-  const lider = miEquipo ? (miEquipo.liderNombre || '—') : '—';
+  const lider = nombreLiderEquipo(miEquipo) || '—';
   const docente = typeof nombreDocenteEquipo === 'function' ? nombreDocenteEquipo() : 'tu docente';
   return `
     <div style="font-size:12px;font-weight:bold;margin:16px 0 6px;">Control documental</div>
@@ -4943,7 +4997,8 @@ function vManualCalidad(){
         Genera un solo documento PDF con toda la información que tu equipo ha registrado en el sistema de gestión,
         en orden: ficha corporativa, planeación estratégica, políticas y objetivos, estructura orgánica, mapa de
         procesos, caracterización de procesos, matrices, listado documental, procedimientos, formatos, indicadores
-        y no conformidades con sus acciones correctivas.
+        y no conformidades con sus acciones correctivas. Al final incluye la lista de todos los integrantes
+        del equipo con espacio para la firma.
       </p>
       <p style="font-size:12.5px;color:var(--gris-texto);">
         Cada procedimiento y cada formato queda como su propio bloque, con salto de página limpio entre ellos.
@@ -5081,6 +5136,7 @@ function plantillaManualCalidadHTML(){
     ...seccionesFormatos,
     seccionManualHTML('11. Indicadores', sIndicadores),
     seccionManualHTML('12. No conformidades y acciones correctivas', sNC),
+    seccionManualHTML('13. Equipo de trabajo responsable del manual', seccionIntegrantesManualHTML()),
     construirControlDocumentalGenerico()
   ];
 }
