@@ -1814,6 +1814,8 @@ document.addEventListener('click', function(e){
     case 'agregarIntegranteSinCuenta': agregarIntegranteSinCuenta(arg); break;
     case 'quitarIntegranteSinCuenta': quitarIntegranteSinCuenta(arg); break;
     case 'revisarEquipo': revisarEquipo(arg); break;
+    case 'guardarRetroRevision': guardarRetroRevision(); break;
+    case 'descargarManualEquipoRevisado': descargarManualEquipoRevisado(); break;
     case 'crearGrupo': crearGrupo(); break;
     case 'asignarLider': asignarLider(arg); break;
   }
@@ -1980,6 +1982,10 @@ async function loginAs(perfil){
       }
       await cargarMisIncidentes(eq.id);
       await cargarRetoProduccion(eq.id);
+      // Retroalimentación y calificación que el docente ha dado al equipo (se muestra en Informes)
+      const misCal = await sbListarCalificaciones([eq.id]);
+      state.calificaciones = {};
+      if(misCal.length) state.calificaciones[eq.id] = { nota: misCal[0].nota, retro: misCal[0].retroalimentacion, fecha: (misCal[0].creado_en||'').slice(0,10) };
       if(eq.cursoId) await cargarRubricaYCalificaciones(eq.cursoId);
     }
   } else if(state.role==='docente'){
@@ -2110,6 +2116,7 @@ function renderSidebar(){
 function go(view){
   if(window._sinGuardar && !confirm('Tienes texto escrito que todavía no has guardado en esta pantalla. Si sales ahora se perderá. ¿Salir de todos modos?')) return;
   window._sinGuardar = false;
+  if(view!=='revision' && state._respaldoDocente) restaurarEstadoDocente();
   currentView = view; renderSidebar(); renderMain(); window.scrollTo(0,0); }
 
 function showToast(msg){
@@ -3912,8 +3919,13 @@ function nombreLiderEquipo(miEquipo){
   return '';
 }
 /** Lista sin repetir de los integrantes del equipo: primero el líder, luego los demás. */
+/** Equipo al que corresponden los PDF: el propio (estudiante) o el que el docente está revisando. */
+function equipoDelDocumentoPDF(){
+  const id = (state.role==='docente' && state._respaldoDocente) ? state.equipoRevisando : state.miEquipoId;
+  return state.equipos.find(e=>e.id===id);
+}
 function integrantesEquipoManual(){
-  const miEquipo = state.equipos.find(e=>e.id===state.miEquipoId);
+  const miEquipo = equipoDelDocumentoPDF();
   const lider = nombreLiderEquipo(miEquipo);
   const lista = [];
   const vistos = new Set();
@@ -3953,7 +3965,7 @@ function seccionIntegrantesManualHTML(){
 }
 
 function construirControlDocumentalGenerico(){
-  const miEquipo = state.equipos.find(e=>e.id===state.miEquipoId);
+  const miEquipo = equipoDelDocumentoPDF();
   const lider = nombreLiderEquipo(miEquipo) || '—';
   const docente = typeof nombreDocenteEquipo === 'function' ? nombreDocenteEquipo() : 'tu docente';
   return `
@@ -5532,7 +5544,64 @@ async function crearEstudianteDocente(equipoId){
   showToast(`Cuenta del líder creada: ${nombre}`);
   renderMain();
 }
-function revisarEquipo(id){ state.equipoRevisando = id; go('revision'); }
+/* ---- Revisión del trabajo de un equipo (docente) ----
+   El docente no tiene empresa propia: al revisar, se cargan los datos reales de la empresa
+   del equipo en el estado y, al salir de la revisión, se restaura lo que tenía el docente
+   (p. ej. la lista de "Documentos por aprobar"). */
+const CLAVES_ESTADO_REVISION = ['empresa','planeacion','politicas','objetivos','partesInteresadas','dofa',
+  'requisitosLegales','riesgosOportunidades','sstPeligros','riesgosAmbientales','cargos','procesos',
+  'caracterizaciones','documentos','procedimientos','indicadores','noConformidades','accionesPreventivas','incidentes'];
+function restaurarEstadoDocente(){
+  if(!state._respaldoDocente) return;
+  CLAVES_ESTADO_REVISION.forEach(k=>{ state[k] = state._respaldoDocente[k]; });
+  state._respaldoDocente = null;
+}
+async function revisarEquipo(id){
+  const eq = state.equipos.find(e=>String(e.id)===String(id));
+  if(!eq){ showToast('No se encontró el equipo'); return; }
+  if(!eq.empresaId){ showToast('Este equipo todavía no tiene empresa registrada'); return; }
+  if(!state._respaldoDocente){
+    state._respaldoDocente = {};
+    CLAVES_ESTADO_REVISION.forEach(k=>{ state._respaldoDocente[k] = state[k]; });
+  }
+  showToast('Cargando el trabajo del equipo...');
+  const { data: es } = await sb.from('empresas_simuladas').select('*').eq('id', eq.empresaId).maybeSingle();
+  const em = es || {};
+  state.empresa = {
+    id: eq.empresaId, nombre: eq.empresa, sector: eq.sector, actividad: eq.actividad, tamano: em.tamano || '',
+    trabajadores: eq.trabajadores, ubicacion: eq.ubicacion, clientes: em.clientes || '', proveedores: em.proveedores || '',
+    descripcion: eq.descripcion, alcanceSIG: em.alcance_sig || '', logo: eq.logo || null
+  };
+  try{
+    await cargarLote1(eq.empresaId);
+    await cargarLote2(eq.empresaId);
+    await cargarLote3(eq.empresaId);
+    await cargarLote4(eq.empresaId);
+    await cargarIndicadores(eq.empresaId);
+    await cargarNoConformidades(eq.empresaId);
+    await cargarAccionesPreventivas(eq.empresaId);
+  }catch(err){
+    console.warn('[revision] error cargando datos del equipo', err);
+    showToast('Atención: no se pudo cargar toda la información del equipo');
+  }
+  state.equipoRevisando = eq.id;
+  go('revision');
+}
+async function guardarRetroRevision(){
+  const equipoId = state.equipoRevisando;
+  const nota = parseFloat(val('rev_nota'));
+  const retro = (val('rev_retro')||'').trim();
+  if(isNaN(nota) || nota<0 || nota>5){ showToast('Ingresa una calificación entre 0.0 y 5.0'); return; }
+  if(!retro){ showToast('Escribe la retroalimentación para el equipo'); return; }
+  showToast('Guardando...');
+  const r = await sbGuardarCalificacion(equipoId, nota, retro);
+  if(!r.ok){ showToast('No se pudo guardar: ' + r.error); return; }
+  state.calificaciones[equipoId] = { nota, retro, fecha: new Date().toISOString().slice(0,10) };
+  window._sinGuardar = false;
+  showToast('Retroalimentación guardada. El equipo la verá en su sección de Informes.');
+  renderMain();
+}
+function descargarManualEquipoRevisado(){ descargarManualCalidad(); }
 async function eliminarIntegrante(arg){
   const [equipoId, usuarioId] = arg.split('|');
   if(!usuarioId){ showToast('Esta persona no tiene una cuenta vinculada todavía'); return; }
@@ -5577,45 +5646,108 @@ async function crearDocenteAdmin(){
 }
 function vRevisionTrabajo(){
   const eq = state.equipos.find(e=>e.id===state.equipoRevisando);
-  if(!eq) return '<div class="empty-note">Selecciona un equipo desde "Equipos y empresas simuladas".</div>';
+  if(!eq || !state._respaldoDocente) return '<div class="empty-note">Selecciona un equipo desde "Seguimiento de equipos" y haz clic en "Revisar trabajo".</div>';
+  const e = state.empresa || {};
+  const vacio = (txt, cols)=> `<tr><td colspan="${cols}" class="empty-note">${txt}</td></tr>`;
+  const v = x => (x===undefined||x===null||x==='') ? '—' : x;
   const docsAprobados = state.documentos.filter(d=>d.estado==='Aprobado').length;
-  const docRows = state.documentos.map(d=>`
-    <tr><td><code class="doc-code">${d.codigo}</code></td><td>${d.nombre}</td><td>${d.tipo}</td><td>${estadoBadge(d.estado)}</td></tr>
-  `).join('') || '<tr><td colspan="4" class="empty-note">Sin documentos registrados.</td></tr>';
+  const caracterizados = state.procesos.filter(p=>state.caracterizaciones[p.id]).length;
+  const dofa = state.dofa || {F:[],O:[],D:[],A:[]};
+  const totalDofa = ['F','O','D','A'].reduce((a,k)=>a+((dofa[k]||[]).length),0);
+  const cal = state.calificaciones[eq.id];
+
+  const polRows = state.politicas.map(p=>`<tr><td>${v(p.tipo)}</td><td>${v(p.texto)}</td></tr>`).join('') || vacio('Sin políticas registradas.',2);
+  const objRows = state.objetivos.map(o=>`<tr><td><code class="doc-code">${v(o.codigo)}</code></td><td>${v(o.descripcion)}</td><td>${v(o.meta)}</td></tr>`).join('') || vacio('Sin objetivos registrados.',3);
+  const piRows = state.partesInteresadas.map(p=>`<tr><td>${v(p.nombre)}</td><td>${v(p.tipo)}</td><td>${v(p.necesidades)}</td></tr>`).join('') || vacio('Sin partes interesadas registradas.',3);
+  const procRows = state.procesos.map(p=>`<tr><td><code class="doc-code">${v(p.codigo)}</code></td><td>${v(p.nombre)}</td><td>${v(p.tipo)}</td>
+      <td>${state.caracterizaciones[p.id] ? '<span class="badge verde">Caracterizado</span>' : '<span class="badge gris">Pendiente</span>'}</td></tr>`).join('') || vacio('Sin procesos registrados.',4);
+  const docRows = state.documentos.map(d=>`<tr><td><code class="doc-code">${v(d.codigo)}</code></td><td>${v(d.nombre)}</td><td>${v(d.tipo)}</td><td>${estadoBadge(d.estado)}</td></tr>`).join('') || vacio('Sin documentos registrados.',4);
   const indRows = state.indicadores.map(i=>{
-    const last = i.mediciones[i.mediciones.length-1];
-    return `<tr><td><code class="doc-code">${i.codigo}</code></td><td>${i.nombre}</td><td>${i.meta}</td><td>${last?last.valor:'—'}</td></tr>`;
-  }).join('') || '<tr><td colspan="4" class="empty-note">Sin indicadores registrados.</td></tr>';
+    const last = (i.mediciones||[])[(i.mediciones||[]).length-1];
+    return `<tr><td><code class="doc-code">${v(i.codigo)}</code></td><td>${v(i.nombre)}</td><td>${v(i.meta)}</td><td>${last?v(last.valor):'—'}</td></tr>`;
+  }).join('') || vacio('Sin indicadores registrados.',4);
+  const ncRows = state.noConformidades.map(n=>`<tr><td><code class="doc-code">${v(n.codigo)}</code></td><td>${v(n.descripcion)}</td><td>${v(n.accionCorrectiva)}</td><td>${v(n.estado)}</td></tr>`).join('') || vacio('Sin no conformidades registradas.',4);
 
   return `
-    <div class="crumb">Curso</div>
+    <div class="crumb">Curso · Seguimiento de equipos</div>
     <h1 class="page-title">Revisión de trabajo — ${eq.nombre} · ${eq.empresa}</h1>
     <p style="font-size:13px;color:var(--gris-texto);margin-top:-10px;">
-      Vista de solo lectura del sistema de gestión construido por el equipo. En este prototipo de demostración, el
-      contenido detallado (procesos, documentos, indicadores) refleja el espacio de trabajo actualmente activo.
+      Vista de solo lectura del sistema de gestión construido por el equipo. Líder: ${eq.liderNombre||'sin asignar'} ·
+      Integrantes: ${(eq.integrantes||[]).join(', ')||'—'}
     </p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+      <a class="btn small secondary" data-action="go" data-arg="seguimiento">← Volver a equipos</a>
+      <a class="btn small secondary" data-action="descargarManualEquipoRevisado">📘 Descargar manual de calidad del equipo</a>
+      <a class="btn small" href="#retroalimentacion">✍️ Ir a retroalimentación</a>
+    </div>
+
     <div class="grid-cards">
-      <div class="card"><div class="label">Procesos caracterizados</div><div class="value">${Object.keys(state.caracterizaciones).length}/${state.procesos.length}</div></div>
+      <div class="card"><div class="label">Avance</div><div class="value">${eq.avance||0}%</div></div>
+      <div class="card"><div class="label">Procesos caracterizados</div><div class="value">${caracterizados}/${state.procesos.length}</div></div>
       <div class="card"><div class="label">Documentos aprobados</div><div class="value">${docsAprobados}/${state.documentos.length}</div></div>
-      <div class="card"><div class="label">Indicadores creados</div><div class="value">${state.indicadores.length}</div></div>
+      <div class="card"><div class="label">Indicadores</div><div class="value">${state.indicadores.length}</div></div>
       <div class="card"><div class="label">Procedimientos</div><div class="value">${state.procedimientos.length}</div></div>
+      <div class="card"><div class="label">No conformidades</div><div class="value">${state.noConformidades.length}</div></div>
+    </div>
+
+    <h2 class="section-title">Ficha corporativa</h2>
+    <div class="panel" style="font-size:13.4px;">
+      <p style="margin-top:0;"><b>Sector:</b> ${v(e.sector)} · <b>Actividad:</b> ${v(e.actividad)} · <b>Tamaño:</b> ${v(e.tamano)} · <b>Trabajadores:</b> ${v(e.trabajadores)} · <b>Ubicación:</b> ${v(e.ubicacion)}</p>
+      <p><b>Descripción:</b> ${v(e.descripcion)}</p>
+      <p style="margin-bottom:0;"><b>Alcance del SIG:</b> ${v(e.alcanceSIG)}</p>
     </div>
 
     <h2 class="section-title">Misión y visión</h2>
     <div class="panel">
-      <p style="font-size:13.6px;"><b>Misión:</b> ${state.planeacion.mision||'Sin definir todavía.'}</p>
-      <p style="font-size:13.6px;"><b>Visión:</b> ${state.planeacion.vision||'Sin definir todavía.'}</p>
+      <p style="font-size:13.6px;margin-top:0;"><b>Misión:</b> ${(state.planeacion&&state.planeacion.mision)||'Sin definir todavía.'}</p>
+      <p style="font-size:13.6px;margin-bottom:0;"><b>Visión:</b> ${(state.planeacion&&state.planeacion.vision)||'Sin definir todavía.'}</p>
+    </div>
+
+    <h2 class="section-title">Políticas</h2>
+    <table><thead><tr><th>Tipo</th><th>Política</th></tr></thead><tbody>${polRows}</tbody></table>
+
+    <h2 class="section-title">Objetivos</h2>
+    <table><thead><tr><th>Código</th><th>Descripción</th><th>Meta</th></tr></thead><tbody>${objRows}</tbody></table>
+
+    <h2 class="section-title">Partes interesadas</h2>
+    <table><thead><tr><th>Parte interesada</th><th>Tipo</th><th>Necesidades y expectativas</th></tr></thead><tbody>${piRows}</tbody></table>
+
+    <h2 class="section-title">Procesos</h2>
+    <table><thead><tr><th>Código</th><th>Proceso</th><th>Tipo</th><th>Caracterización</th></tr></thead><tbody>${procRows}</tbody></table>
+
+    <h2 class="section-title">Matrices</h2>
+    <div class="grid-cards">
+      <div class="card"><div class="label">Elementos DOFA</div><div class="value">${totalDofa}</div></div>
+      <div class="card"><div class="label">Requisitos legales</div><div class="value">${state.requisitosLegales.length}</div></div>
+      <div class="card"><div class="label">Riesgos y oportunidades</div><div class="value">${state.riesgosOportunidades.length}</div></div>
+      <div class="card"><div class="label">Peligros SST</div><div class="value">${state.sstPeligros.length}</div></div>
+      <div class="card"><div class="label">Aspectos ambientales</div><div class="value">${state.riesgosAmbientales.length}</div></div>
     </div>
 
     <h2 class="section-title">Documentos</h2>
-    <table><thead><tr><th>Código</th><th>Nombre</th><th>Tipo</th><th>Estado</th></tr></thead>
-      <tbody>${docRows}</tbody></table>
+    <table><thead><tr><th>Código</th><th>Nombre</th><th>Tipo</th><th>Estado</th></tr></thead><tbody>${docRows}</tbody></table>
 
     <h2 class="section-title">Indicadores</h2>
-    <table><thead><tr><th>Código</th><th>Nombre</th><th>Meta</th><th>Último resultado</th></tr></thead>
-      <tbody>${indRows}</tbody></table>
+    <table><thead><tr><th>Código</th><th>Nombre</th><th>Meta</th><th>Último resultado</th></tr></thead><tbody>${indRows}</tbody></table>
 
-    <button class="btn small" style="margin-top:16px;" data-action="go" data-arg="seguimiento">← Volver a equipos</button>
+    <h2 class="section-title">No conformidades</h2>
+    <table><thead><tr><th>Código</th><th>Descripción</th><th>Acción correctiva</th><th>Estado</th></tr></thead><tbody>${ncRows}</tbody></table>
+
+    <h2 class="section-title" id="retroalimentacion">Retroalimentación y calificación</h2>
+    ${cal ? `<div class="comment" style="border-left-color:var(--verde);margin-bottom:12px;">
+        <b>Última registrada: ${Number(cal.nota).toFixed(1)} / 5.0</b> (${cal.fecha})<br>${cal.retro || 'Sin comentario.'}
+      </div>` : '<div class="empty-note" style="margin-bottom:12px;">Todavía no has dado retroalimentación a este equipo.</div>'}
+    <div class="panel">
+      <div class="form-grid">
+        <div class="form-row"><label>Calificación (0.0 – 5.0)</label><input id="rev_nota" type="number" step="0.1" min="0" max="5" value="${cal?cal.nota:''}" placeholder="Ej. 4.2"></div>
+      </div>
+      <div class="form-row"><label>Retroalimentación para el equipo</label>
+        <textarea id="rev_retro" rows="5" placeholder="Fortalezas, aspectos por mejorar y recomendaciones para el equipo..."></textarea></div>
+      <button class="btn" data-action="guardarRetroRevision">Guardar retroalimentación</button>
+      <p style="font-size:12px;color:var(--gris-texto);margin-bottom:0;">El equipo la verá en su sección de <b>Informes</b>. Cada vez que guardes queda registrada una nueva entrada; se muestra la más reciente.</p>
+    </div>
+
+    <a class="btn small" style="margin-top:16px;" data-action="go" data-arg="seguimiento">← Volver a equipos</a>
   `;
 }
 /* ========================================================================
